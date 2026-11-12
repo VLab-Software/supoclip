@@ -13,6 +13,7 @@ def test_antigravity_uses_openai_compatible_provider():
     model = _build_transcript_model(config)
     assert isinstance(model, OpenAIChatModel)
     assert model.model_name == "available-model"
+    assert model._provider.client.default_headers["Authorization"] == "Bearer test-key"
     assert _get_missing_llm_key_error(config.llm, config) is None
 
 

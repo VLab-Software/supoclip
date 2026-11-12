@@ -6,7 +6,7 @@ services:
       dockerfile: frontend/Dockerfile
       target: ${FRONTEND_BUILD_TARGET:-runner}
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.109:8001}
         - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
         - NEXT_PUBLIC_SELF_HOST=${SELF_HOST:-true}
         - NEXT_PUBLIC_PRO_PRICE_MONTHLY=${NEXT_PUBLIC_PRO_PRICE_MONTHLY:-9.99}
@@ -32,13 +32,12 @@ services:
       # Keep the legacy port for deployments whose proxy already uses 3001.
       # .env.example selects 3107 for new self-hosted installations.
       - "${FRONTEND_BIND_IP:-192.168.1.109}:${FRONTEND_PORT:-3107}:3107"
-    volumes:
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.1.109:8001}
       - BACKEND_INTERNAL_URL=http://backend:8000
-      - BACKEND_PUBLIC_URL=${BACKEND_PUBLIC_URL:-}
+      - BACKEND_PUBLIC_URL=${BACKEND_PUBLIC_URL:-http://192.168.1.109:8001}
       - NEXT_PUBLIC_SELF_HOST=${SELF_HOST:-true}
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3107}
       - NEXT_PUBLIC_LANDING_ONLY_MODE=${NEXT_PUBLIC_LANDING_ONLY_MODE:-false}
@@ -124,6 +123,8 @@ services:
     # arm64 image. CUDA wheels are amd64-only.
     platform: "${BACKEND_PLATFORM:-linux/amd64}"
     command: [".venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${BACKEND_BIND_IP:-192.168.1.109}:${BACKEND_PORT:-8001}:8000"
     expose:
       - "8000"
     volumes:
@@ -309,6 +310,7 @@ services:
 
   # Worker process for background video processing
   worker:
+    gpus: all
     build:
       context: ./backend
       dockerfile: Dockerfile
