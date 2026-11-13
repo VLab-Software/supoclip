@@ -168,3 +168,46 @@ def test_real_reaction_render_separates_inset_and_source_and_keeps_audio(tmp_pat
     # No copy of the red inset may survive anywhere in the source panel.
     lower = pixels[640:]
     assert not np.any((lower[:, :, 0] > 180) & (lower[:, :, 2] < 60))
+
+
+def test_content_only_corner_webcam_activates_reaction_split_with_fallback(tmp_path):
+    frames = samples([REACTOR])
+    assert reaction_layout.find_reactor_face(640, 360, frames) is None
+    assert reaction_layout.find_reactor_face(640, 360, frames, require_other_faces=False) == REACTOR
+
+    with patch.object(reaction_layout, 'measure_reaction_inset', return_value=None):
+        plan = reaction_layout.choose_reaction_layout(
+            tmp_path / 'screen.mp4',
+            640,
+            360,
+            6,
+            frames,
+            require_other_faces=False,
+            allow_inset_fallback=True,
+        )
+    assert plan is not None
+    assert plan['kind'] == 'reaction'
+    assert plan['source_runs'][0][2] == 'content'
+    _assert_source_crops_fit(plan['video_filter'], 640, 360)
+
+
+def test_describe_vertical_layout_routes_corner_webcam_screen_recording_to_reaction(tmp_path, monkeypatch):
+    frames = samples([REACTOR])
+    monkeypatch.setenv('REACTION_ALLOW_CONTENT_SPLIT', 'true')
+    with (
+        patch.object(reframing, 'ffprobe_duration', return_value=12.0),
+        patch.object(reframing, 'analyze_vertical_clip', return_value=([], [], frames)),
+        patch.object(reaction_layout, 'measure_reaction_inset', return_value=None),
+    ):
+        desc = reframing.describe_vertical_layout(tmp_path / 'screen.mp4', 640, 360)
+    assert desc['kind'] == 'reaction'
+    assert desc['mode'] == 'complex'
+
+
+def test_dynamic_punch_zoom_fragment_formats_valid_zoompan():
+    frag = reframing.dynamic_punch_zoom_fragment(14.0)
+    assert frag is not None
+    assert 'zoompan=' in frag
+    assert 'cos(2*PI*it/7.000)' in frag
+    assert 'setsar=1' in frag
+    assert reframing.dynamic_punch_zoom_fragment(2.0) is None

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Tuple
 import cv2
 import numpy as np
+import os
 import re
 import shutil
 import subprocess
@@ -1151,6 +1152,22 @@ def build_scene_crop_expression(
     return result
 
 
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _dynamic_punch_delta() -> float:
+    raw = os.getenv("DYNAMIC_PUNCH_ZOOM_SCALE", "1.12").strip()
+    try:
+        scale = float(raw)
+    except ValueError:
+        scale = 1.12
+    return max(0.04, min(0.35, scale - 1.0))
+
+
 def kenburns_zoom_fragment(duration: float) -> Optional[str]:
     """Slow linear punch-in fragment producing a 1080x1920 [setsar-ed] stream.
 
@@ -1171,6 +1188,33 @@ def kenburns_zoom_fragment(duration: float) -> Optional[str]:
         f"zoompan=z='{z_expr}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*{KENBURNS_FOCUS_Y}'"
         f":d=1:s=1080x1920:fps={OUTPUT_FPS},{UPSCALE_SHARPEN_FILTER},setsar=1"
     )
+
+
+def dynamic_punch_zoom_fragment(
+    duration: float,
+    scale_delta: Optional[float] = None,
+    cycle_seconds: float = 7.0,
+) -> Optional[str]:
+    """Rhythmic smooth punch-in/out fragment for static talking-head clips."""
+    if duration < KENBURNS_MIN_SECONDS:
+        return None
+    delta = _dynamic_punch_delta() if scale_delta is None else max(0.04, min(0.35, scale_delta))
+    period = max(4.0, float(cycle_seconds))
+    z_expr = (
+        f"if(isnan(it)\\,1\\,1+{delta:.3f}*(0.5-0.5*cos(2*PI*it/{period:.3f})))"
+    )
+    return (
+        f"scale={KENBURNS_SUPERSAMPLE_W}:{KENBURNS_SUPERSAMPLE_H}:flags=lanczos,"
+        f"fps={OUTPUT_FPS},"
+        f"zoompan=z='{z_expr}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*{KENBURNS_FOCUS_Y}'"
+        f":d=1:s=1080x1920:fps={OUTPUT_FPS},{UPSCALE_SHARPEN_FILTER},setsar=1"
+    )
+
+
+def _static_zoom_fragment(duration: float) -> Optional[str]:
+    if _env_flag("DYNAMIC_PUNCH_ZOOM", True):
+        return dynamic_punch_zoom_fragment(duration) or kenburns_zoom_fragment(duration)
+    return kenburns_zoom_fragment(duration)
 
 
 FIT_CHAIN = (
@@ -1498,7 +1542,7 @@ def describe_vertical_layout(
     # slow punch-in so the frame still breathes.
     if crop_w >= width:
         sx, sy, sw, sh = detect_optimal_crop_region(input_path, 0, min(duration, 12.0))
-        tail = kenburns_zoom_fragment(duration) or VERTICAL_SCALE_CHAIN
+        tail = _static_zoom_fragment(duration) or VERTICAL_SCALE_CHAIN
         return _described("crop", f"crop={sw}:{sh}:{sx}:{sy},{tail}", "vf", None)
 
     # One fast decode pass yields the face track, face boxes, and scene cuts.
@@ -1560,6 +1604,18 @@ def describe_vertical_layout(
     reaction = choose_reaction_layout(
         input_path, width, height, duration, face_samples, scene_cuts
     )
+    if not reaction and _env_flag("REACTION_ALLOW_CONTENT_SPLIT", True):
+        if find_reactor_face(width, height, face_samples, require_other_faces=False):
+            reaction = choose_reaction_layout(
+                input_path,
+                width,
+                height,
+                duration,
+                face_samples,
+                scene_cuts,
+                require_other_faces=False,
+                allow_inset_fallback=True,
+            )
     if reaction:
         logger.info("Reaction layout: inset %s, %d source sections", reaction['inset'], len(reaction['source_runs']))
         return _described("reaction", reaction["video_filter"], "complex", reaction["caption_y"])
@@ -1628,11 +1684,11 @@ def describe_vertical_layout(
         crop_chain = f"crop={crop_w}:{crop_h}:{static_x}:0,{VERTICAL_SCALE_CHAIN}"
 
     if not fit_intervals:
-        # Static, all-face clip: add the slow Ken Burns punch-in. (The moving
-        # tracked crop and the compositor path keep the plain chain — they
-        # already have motion, and zoompan's re-timing would fight overlays.)
+        # Static, all-face clip: add the slow Ken Burns or dynamic punch-in.
+        # (The moving tracked crop and the compositor path keep the plain chain
+        # — they already have motion, and zoompan's re-timing would fight overlays.)
         if not moving:
-            zoom = kenburns_zoom_fragment(duration)
+            zoom = _static_zoom_fragment(duration)
             if zoom:
                 return _described(
                     "crop",

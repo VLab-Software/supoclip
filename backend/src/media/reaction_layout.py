@@ -30,23 +30,38 @@ def _crop_inside(w: int, h: int, x: int, y: int, width: int, height: int) -> boo
     return w >= 2 and h >= 2 and x >= 0 and y >= 0 and x + w <= width and y + h <= height
 
 
-def find_reactor_face(width: int, height: int, samples: Sequence[FaceFrame]) -> Optional[Box]:
+def find_reactor_face(
+    width: int,
+    height: int,
+    samples: Sequence[FaceFrame],
+    *,
+    require_other_faces: bool = True,
+) -> Optional[Box]:
     """Find a small, stationary upper-corner face, supported across the clip."""
     if len(samples) < 8:
         return None
     for right in (True, False):
         found = []
         other_count = 0
+        extra_faces = 0
         for _, faces in samples:
             corner = [f for f in faces if
                       (f[0] + f[2] / 2 > width * .76 if right else f[0] + f[2] / 2 < width * .24)
-                      and f[1] + f[3] / 2 < height * .25
-                      and .001 < f[2] * f[3] / (width * height) < .025]
+                      and f[1] + f[3] / 2 < height * .28
+                      and .001 < f[2] * f[3] / (width * height) < .04]
             if len(corner) != 1:
                 continue
             found.append(corner[0])
             other_count += any(f not in corner and f[1] + f[3] / 2 > height * .3 for f in faces)
-        if len(found) < len(samples) * .75 or other_count < len(samples) * .3:
+            extra_faces += any(f not in corner for f in faces)
+        if len(found) < len(samples) * .75:
+            continue
+        if require_other_faces:
+            if other_count < len(samples) * .3:
+                continue
+        elif extra_faces > len(samples) * .15:
+            # Content-only split is for a single corner webcam over screen/text,
+            # never a 2-speaker podcast or video call.
             continue
         boxes = np.asarray(found)
         centres = boxes[:, :2] + boxes[:, 2:] / 2
@@ -56,6 +71,23 @@ def find_reactor_face(width: int, height: int, samples: Sequence[FaceFrame]) -> 
             continue
         return tuple(float(v) for v in np.median(boxes, axis=0))
     return None
+
+
+def fallback_inset_from_face(width: int, height: int, face: Box) -> Optional[Box]:
+    """Estimate a webcam inset box around a stable corner face when edges are rounded/soft."""
+    fx, fy, fw, fh = face
+    if width <= 0 or height <= 0 or fw <= 0 or fh <= 0:
+        return None
+    box_w = max(fw * 2.1, width * 0.14)
+    box_w = min(box_w, width * 0.35)
+    box_h = max(fh * 2.2, box_w * REACTOR_HEIGHT / 1080.0)
+    box_h = min(box_h, height * 0.45)
+    cx, cy = fx + fw / 2.0, fy + fh / 2.0
+    ix = max(0.0, min(float(width) - box_w, cx - box_w / 2.0))
+    iy = max(0.0, min(float(height) - box_h, cy - box_h * 0.44))
+    if not _inside(face, (ix, iy, box_w, box_h)):
+        return None
+    return (float(ix), float(iy), float(box_w), float(box_h))
 
 
 def _edge_peak(values: np.ndarray, start: int, end: int) -> Optional[int]:
@@ -192,7 +224,7 @@ def build_reaction_layout(
         '[0:v]split=3[reactor_src][source_bg][source_src]',
         f'[reactor_src]crop={rw}:{rh}:{rx}:{ry},scale=1080:{REACTOR_HEIGHT}:flags=lanczos,'
         f'{UPSCALE_SHARPEN_FILTER},setsar=1[reactor]',
-        f'[source_bg]drawbox=x={int(ix)}:y=0:w={int(iw)}:h={int(ih)}:color=black:t=fill,'
+        f'[source_bg]drawbox=x={int(ix)}:y={int(iy)}:w={int(iw)}:h={int(ih)}:color=black:t=fill,'
         'scale=540:640:force_original_aspect_ratio=increase,crop=540:640,'
         f'gblur=sigma=18:steps=2,scale=1080:{SOURCE_HEIGHT},setsar=1[base0]',
         '[source_src]split=' + str(len(runs)) + ''.join(f'[part{i}]' for i in range(len(runs))),
@@ -261,7 +293,7 @@ def build_reaction_layout(
         else:
             # Keep source text and slides in full. The webcam already covers
             # this rectangle in the original; mask it instead of duplicating it.
-            crop = (f'format=rgba,drawbox=x={int(ix)}:y=0:w={int(iw)}:h={int(ih)}:color=black@0:t=fill:replace=1,'
+            crop = (f'format=rgba,drawbox=x={int(ix)}:y={int(iy)}:w={int(iw)}:h={int(ih)}:color=black@0:t=fill:replace=1,'
                     f'scale=1080:{SOURCE_HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos')
         graph.append(f'[part{i}]{crop},setsar=1[p{i}]')
         enable = f'gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'
@@ -272,13 +304,22 @@ def build_reaction_layout(
 
 
 def choose_reaction_layout(
-    path: Path, width: int, height: int, duration: float, samples: Sequence[FaceFrame],
+    path: Path,
+    width: int,
+    height: int,
+    duration: float,
+    samples: Sequence[FaceFrame],
     scene_cuts: Sequence[float] = (),
+    *,
+    require_other_faces: bool = True,
+    allow_inset_fallback: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    face = find_reactor_face(width, height, samples)
+    face = find_reactor_face(width, height, samples, require_other_faces=require_other_faces)
     if face is None:
         return None
     inset = measure_reaction_inset(path, width, height, duration, face)
+    if inset is None and allow_inset_fallback:
+        inset = fallback_inset_from_face(width, height, face)
     if inset is None:
         return None
     return build_reaction_layout(width, height, duration, face, inset, samples, scene_cuts)
